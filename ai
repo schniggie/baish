@@ -1,0 +1,164 @@
+#!/bin/bash
+
+# Default values
+VERBOSE=false
+PERSONA="You are a helpful assistant"
+MODEL="claude-4-opus"
+API_URL="ch.at/v1/chat/completions"
+PERSONA_FILE=""
+PERSONA_FROM_CLI=false
+CHAT_MODE=false
+
+# Initialize empty history array for chat mode
+declare -a CHAT_HISTORY
+
+# Parse arguments
+PARSED_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -v)
+            VERBOSE=true
+            shift
+            ;;
+        -p)
+            PERSONA="$2"
+            PERSONA_FROM_CLI=true
+            shift 2
+            ;;
+        -P)
+            PERSONA_FILE="$2"
+            shift 2
+            ;;
+        -m)
+            MODEL="$2"
+            shift 2
+            ;;
+        -c)
+            CHAT_MODE=true
+            shift
+            ;;
+        *)
+            # Non-option argument, add to array
+            PARSED_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Handle persona from file
+if [[ -n "$PERSONA_FILE" ]]; then
+    if [[ ! -f "$PERSONA_FILE" ]]; then
+        echo "Error: Persona file '$PERSONA_FILE' not found"
+        exit 1
+    fi
+    PERSONA=$(cat "$PERSONA_FILE")
+fi
+
+# Handle edge case where both -p and -P options are used
+if [[ -n "$PERSONA_FILE" && "$PERSONA_FROM_CLI" == true ]]; then
+    echo "Warning: Both -p and -P options provided. Using persona from file."
+fi
+
+# Function to build JSON messages array
+generateMessages() {
+    local messages="[{\"role\": \"system\", \"content\": \"$(echo "$PERSONA" | sed 's/"/\\"/g')\"}"
+    
+    # Add all entries from chat history
+    for entry in "${CHAT_HISTORY[@]}"; do
+        messages+=",$entry"
+    done
+    
+    # Add current user message
+    local escaped_prompt=$(echo "$1" | sed 's/"/\\"/g')
+    messages+=",{\"role\": \"user\", \"content\": \"$escaped_prompt\"}]"
+    
+    echo "$messages"
+}
+
+# Function to make API call
+makeAPICall() {
+    local user_message="$1"
+    local messages=$(generateMessages "$user_message")
+    
+    local response=$(curl -s "$API_URL" \
+        --data "{
+            \"model\": \"$MODEL\",
+            \"messages\": $messages
+        }")
+    
+    if [[ "$VERBOSE" == true ]]; then
+        echo "$response"
+    else
+        echo "$response" | jq -r '.choices[0].message.content'
+    fi
+}
+
+# Main program logic
+if [[ "$CHAT_MODE" == true ]]; then
+    # Chat mode - interactive conversation
+    echo "=== Chat Mode Enabled ==="
+    echo "Type 'quit', 'exit', or Ctrl+D to end the conversation."
+    echo ""
+    
+    while true; do
+        # Read user input
+        read -p "You: " user_input
+        
+        # Check for exit conditions
+        if [[ "$user_input" =~ ^(quit|exit)$ ]]; then
+            echo "Goodbye!"
+            break
+        fi
+        
+        # Get AI response and display it
+        ai_response=$(makeAPICall "$user_input")
+        
+        # Display response based on verbose flag
+        if [[ "$VERBOSE" == true ]]; then
+            echo "--- Response ---"
+        else
+            echo "AI: $ai_response"
+        fi
+        
+        # Add messages to history
+        # First add the user's message
+        CHAT_HISTORY+=("{\"role\": \"user\", \"content\": \"$(echo "$user_input" | sed 's/"/\\"/g')\"}")
+        # Then add the AI's response
+        CHAT_HISTORY+=("{\"role\": \"assistant\", \"content\": \"$(echo "$ai_response" | sed 's/"/\\"/g')\"}")
+        
+    done
+    
+else
+    # Single-shot mode (original behavior)
+    
+    # Check if prompt was provided as argument
+    if [[ ${#PARSED_ARGS[@]} -gt 0 ]]; then
+        # Use the first (and should be only) argument as prompt
+        PROMPT="${PARSED_ARGS[0]}"
+    elif ! tty -s; then
+        # No prompt argument, check if stdin has data
+        # Read from stdin only if it's not a terminal
+        PROMPT=$(cat)
+    else
+        # No stdin and no argument
+        echo "Usage: ai [-v] [-p persona] [-m model] 'your prompt'"
+        echo "   or: echo 'your prompt' | ai [-v] [-p persona] [-m model]"
+        echo "   or: cat file.txt | ai [-v] [-p persona] [-m model]"
+        echo "   or: ai -c [-v] [-p persona] [-m model] 'initial prompt'"
+        exit 1
+    fi
+    
+    # Check if prompt is empty
+    if [[ -z "$PROMPT" ]]; then
+        echo "Error: No prompt provided"
+        exit 1
+    fi
+    
+    # Make the API call and display response
+    ai_response=$(makeAPICall "$PROMPT")
+    if [[ "$VERBOSE" == true ]]; then
+        echo "$ai_response"
+    else
+        echo "$ai_response"
+    fi
+fi
